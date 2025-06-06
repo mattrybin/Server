@@ -21,3 +21,8 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           script: |
             nmap -sS -T5 -p- --min-rate 1000 localhost
+            nmap -sV -sC -p 22,80,443,3200,3301,4000,4317,4318,5432,6111,8000,8080,8443,44315 localhost
+            ss -tulpn | grep -E "(22|80|443|3200|3301|4000|4317|4318|5432|6111|8000|8080|8443|44315)"
+            lsof -i -P -n | grep LISTEN
+
+
