@@ -22,11 +22,9 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           script: |
             #!/bin/bash
-            # Complete Package Inventory Script
-            # Shows all installed packages with current version, available versions, and sizes
 
             echo "=========================================="
-            echo "    COMPLETE PACKAGE INVENTORY AUDIT"
+            echo "  ENHANCED PACKAGE INVENTORY WITH DATES"
             echo "=========================================="
             echo "Generated at: $(date)"
             echo "System: $(lsb_release -d 2>/dev/null | cut -f2 || cat /etc/debian_version)"
@@ -56,8 +54,53 @@ jobs:
             is_newer_version() {
                 local current="$1"
                 local available="$2"
-                # Use dpkg to compare versions
                 dpkg --compare-versions "$available" gt "$current" 2>/dev/null
+            }
+
+            # Function to get package date from apt-cache
+            get_package_date() {
+                local package="$1"
+                local version="$2"
+                
+                # Try to get date from apt-cache show
+                local date_info=$(apt-cache show "$package=$version" 2>/dev/null | grep "^Date:" | head -1 | cut -d' ' -f2-)
+                
+                if [ -z "$date_info" ]; then
+                    # Fallback to general package info
+                    date_info=$(apt-cache show "$package" 2>/dev/null | grep "^Date:" | head -1 | cut -d' ' -f2-)
+                fi
+                
+                echo "$date_info"
+            }
+
+            # Function to calculate days between dates
+            calculate_age_days() {
+                local date1="$1"  # older date
+                local date2="$2"  # newer date
+                
+                if [ -n "$date1" ] && [ -n "$date2" ]; then
+                    local epoch1=$(date -d "$date1" +%s 2>/dev/null)
+                    local epoch2=$(date -d "$date2" +%s 2>/dev/null)
+                    
+                    if [ -n "$epoch1" ] && [ -n "$epoch2" ]; then
+                        local diff=$(( (epoch2 - epoch1) / 86400 ))
+                        echo "$diff"
+                    else
+                        echo "N/A"
+                    fi
+                else
+                    echo "N/A"
+                fi
+            }
+
+            # Function to format date nicely
+            format_date() {
+                local date_str="$1"
+                if [ -n "$date_str" ]; then
+                    date -d "$date_str" "+%Y-%m-%d" 2>/dev/null || echo "$date_str"
+                else
+                    echo "N/A"
+                fi
             }
 
             echo "=========================================="
@@ -65,10 +108,15 @@ jobs:
             echo "=========================================="
 
             echo "=== PACKAGE COUNTS ==="
-            echo "Total installed packages: $(dpkg -l | grep -c '^ii')"
-            echo "Upgradable packages: $(apt list --upgradable 2>/dev/null | grep -c upgradable)"
-            echo "Automatically installed: $(apt-mark showauto | wc -l)"
-            echo "Manually installed: $(apt-mark showmanual | wc -l)"
+            total_packages=$(dpkg -l | grep -c '^ii')
+            upgradable_count=$(apt list --upgradable 2>/dev/null | grep -c upgradable)
+            auto_count=$(apt-mark showauto | wc -l)
+            manual_count=$(apt-mark showmanual | wc -l)
+
+            echo "Total installed packages: $total_packages"
+            echo "Upgradable packages: $upgradable_count"
+            echo "Automatically installed: $auto_count"
+            echo "Manually installed: $manual_count"
             echo
 
             echo "=== TOTAL DISK USAGE ==="
@@ -84,35 +132,80 @@ jobs:
             echo
 
             echo "=========================================="
-            echo "           UPGRADABLE PACKAGES"
+            echo "        PACKAGE DATE ANALYSIS"
             echo "=========================================="
 
-            echo "=== PACKAGES WITH AVAILABLE UPDATES ==="
+            echo "=== UPGRADABLE PACKAGES WITH DATE INFO ==="
+            echo "Format: PACKAGE | CURRENT_VERSION | AVAILABLE_VERSION | CURRENT_DATE | AVAILABLE_DATE | AGE_DIFF"
+            echo "=========================================================================================="
+
             apt list --upgradable 2>/dev/null | grep -v "^Listing" | while IFS='/' read package rest; do
                 if [ -n "$package" ]; then
                     current_version=$(dpkg-query -Wf '${Version}' "$package" 2>/dev/null)
-                    available_info=$(apt-cache policy "$package" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
-                    installed_size=$(dpkg-query -Wf '${Installed-Size}' "$package" 2>/dev/null)
-                    size_human=$(human_size $((installed_size * 1024)))
+                    available_version=$(apt-cache policy "$package" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
                     
-                    printf "%-30s %-20s -> %-20s %s\n" "$package" "$current_version" "$available_info" "$size_human"
+                    # Get dates
+                    current_date=$(get_package_date "$package" "$current_version")
+                    available_date=$(get_package_date "$package" "$available_version")
+                    
+                    # Format dates
+                    current_formatted=$(format_date "$current_date")
+                    available_formatted=$(format_date "$available_date")
+                    
+                    # Calculate age difference
+                    age_diff=$(calculate_age_days "$current_date" "$available_date")
+                    if [ "$age_diff" != "N/A" ] && [ "$age_diff" -gt 0 ]; then
+                        age_display="${age_diff} days newer"
+                    elif [ "$age_diff" != "N/A" ] && [ "$age_diff" -lt 0 ]; then
+                        age_display="$((-age_diff)) days older"
+                    else
+                        age_display="N/A"
+                    fi
+                    
+                    printf "%-25s | %-20s | %-20s | %-12s | %-12s | %s\n" \
+                        "$package" \
+                        "$current_version" \
+                        "$available_version" \
+                        "$current_formatted" \
+                        "$available_formatted" \
+                        "$age_display"
                 fi
-            done | head -50
-            echo "... (showing first 50 upgradable packages)"
+            done | head -30
+            echo "... (showing first 30 upgradable packages with date info)"
+            echo
+
+            echo "=== RECENTLY UPDATED PACKAGES (Last 30 days) ==="
+            current_date=$(date +%s)
+            thirty_days_ago=$((current_date - 2592000))
+
+            dpkg -l | grep '^ii' | awk '{print $2}' | head -50 | while read package; do
+                version=$(dpkg-query -Wf '${Version}' "$package" 2>/dev/null)
+                pkg_date=$(get_package_date "$package" "$version")
+                
+                if [ -n "$pkg_date" ]; then
+                    pkg_epoch=$(date -d "$pkg_date" +%s 2>/dev/null)
+                    if [ -n "$pkg_epoch" ] && [ "$pkg_epoch" -gt "$thirty_days_ago" ]; then
+                        formatted_date=$(format_date "$pkg_date")
+                        days_ago=$(( (current_date - pkg_epoch) / 86400 ))
+                        printf "%-30s %-20s %-12s (%d days ago)\n" "$package" "$version" "$formatted_date" "$days_ago"
+                    fi
+                fi
+            done | head -20
             echo
 
             echo "=========================================="
-            echo "         COMPLETE PACKAGE LISTING"
+            echo "         ENHANCED PACKAGE LISTING"
             echo "=========================================="
 
-            echo "Creating comprehensive package report..."
-            echo "Format: PACKAGE | INSTALLED_VERSION | LATEST_AVAILABLE | SIZE | STATUS"
-            echo "========================================================================"
+            echo "Creating comprehensive package report with dates..."
+            echo "Format: PACKAGE | INSTALLED_VERSION | LATEST_AVAILABLE | SIZE | STATUS | INSTALL_DATE | AVAILABLE_DATE"
+            echo "======================================================================================================="
 
             # Create temporary file for processing
             temp_file=$(mktemp)
+            date_temp=$(mktemp)
 
-            # Get all installed packages
+            # Get all installed packages with enhanced info
             dpkg -l | grep '^ii' | awk '{print $2}' | while read package; do
                 # Get current installed version
                 current_version=$(dpkg-query -Wf '${Version}' "$package" 2>/dev/null)
@@ -125,6 +218,12 @@ jobs:
                 policy_output=$(apt-cache policy "$package" 2>/dev/null)
                 candidate_version=$(echo "$policy_output" | grep "Candidate:" | awk '{print $2}')
                 
+                # Get package dates
+                current_date=$(get_package_date "$package" "$current_version")
+                available_date=$(get_package_date "$package" "$candidate_version")
+                current_formatted=$(format_date "$current_date")
+                available_formatted=$(format_date "$available_date")
+                
                 # Determine status
                 status="CURRENT"
                 if [ "$candidate_version" != "$current_version" ] && [ -n "$candidate_version" ] && [ "$candidate_version" != "(none)" ]; then
@@ -133,19 +232,19 @@ jobs:
                     fi
                 fi
                 
-                # Get all available versions
-                all_versions=$(echo "$policy_output" | grep -A 20 "Version table:" | grep "^ \*\*\*\|^     " | awk '{print $1}' | grep -v "^\*\*\*" | head -3 | tr '\n' ' ')
-                
-                printf "%-35s | %-25s | %-25s | %-10s | %s\n" \
+                printf "%-30s | %-20s | %-20s | %-8s | %-15s | %-12s | %-12s\n" \
                     "$package" \
                     "$current_version" \
                     "${candidate_version:-N/A}" \
                     "$size_human" \
-                    "$status"
+                    "$status" \
+                    "$current_formatted" \
+                    "$available_formatted"
                     
-            done | tee "$temp_file"
-
+            done | tee "$temp_file" | head -50
+            echo "... (showing first 50 packages - full report saved to temp file)"
             echo
+
             echo "=========================================="
             echo "         SECURITY UPDATE ANALYSIS"
             echo "=========================================="
@@ -156,6 +255,17 @@ jobs:
 
             echo "=== PACKAGES FROM SECURITY REPOSITORY ==="
             apt-cache policy | grep -A 1 security | head -20 || echo "No security repositories configured"
+            echo
+
+            echo "=== SECURITY UPDATE DATES ==="
+            apt list --upgradable 2>/dev/null | grep -i security | head -10 | while IFS='/' read package rest; do
+                if [ -n "$package" ]; then
+                    available_version=$(apt-cache policy "$package" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+                    available_date=$(get_package_date "$package" "$available_version")
+                    formatted_date=$(format_date "$available_date")
+                    echo "$package: $available_version ($formatted_date)"
+                fi
+            done
             echo
 
             echo "=========================================="
@@ -175,7 +285,9 @@ jobs:
                 policy=$(apt-cache policy "$package" 2>/dev/null)
                 if echo "$policy" | grep -q "now.*local\|now.*unknown"; then
                     version=$(dpkg-query -Wf '${Version}' "$package" 2>/dev/null)
-                    echo "$package ($version) - locally installed or unknown source"
+                    pkg_date=$(get_package_date "$package" "$version")
+                    formatted_date=$(format_date "$pkg_date")
+                    echo "$package ($version) - locally installed or unknown source [$formatted_date]"
                 fi
             done | head -20
             echo
@@ -197,64 +309,78 @@ jobs:
             fi
             echo
 
-            echo "=== RECENTLY INSTALLED PACKAGES ==="
+            echo "=== INSTALLATION HISTORY WITH DATES ==="
+            echo "--- Recently installed packages ---"
             grep "install " /var/log/dpkg.log 2>/dev/null | tail -10 | while read date time action package version; do
                 echo "$date $time: $package ($version)"
             done || echo "Cannot access dpkg log"
             echo
 
-            echo "=== RECENTLY UPGRADED PACKAGES ==="
+            echo "--- Recently upgraded packages ---"
             grep "upgrade " /var/log/dpkg.log 2>/dev/null | tail -10 | while read date time action package old_version new_version; do
                 echo "$date $time: $package ($old_version -> $new_version)"
             done || echo "Cannot access dpkg log"
             echo
 
             echo "=========================================="
-            echo "         PACKAGE ANALYSIS SUMMARY"
+            echo "         ENHANCED ANALYSIS SUMMARY"
             echo "=========================================="
 
-            # Analysis of the temp file
+            # Enhanced analysis of the temp file
             if [ -f "$temp_file" ]; then
                 echo "=== PACKAGE STATUS BREAKDOWN ==="
-                echo "Packages needing updates: $(grep "UPDATE_AVAILABLE" "$temp_file" | wc -l)"
-                echo "Packages current: $(grep "CURRENT" "$temp_file" | wc -l)"
+                update_count=$(grep "UPDATE_AVAILABLE" "$temp_file" | wc -l)
+                current_count=$(grep "CURRENT" "$temp_file" | wc -l)
+                echo "Packages needing updates: $update_count"
+                echo "Packages current: $current_count"
+                echo "Update percentage: $(( update_count * 100 / (update_count + current_count) ))%"
                 echo
                 
                 echo "=== SIZE ANALYSIS ==="
-                echo "Packages > 100MB:"
-                awk -F'|' '{print $4}' "$temp_file" | grep -c "GB\|[0-9][0-9][0-9]MB"
-                echo "Packages > 10MB:"
-                awk -F'|' '{print $4}' "$temp_file" | grep -c "GB\|[0-9][0-9]MB\|[0-9][0-9][0-9]MB"
+                large_packages=$(awk -F'|' '{print $4}' "$temp_file" | grep -c "GB\|[0-9][0-9][0-9]MB")
+                medium_packages=$(awk -F'|' '{print $4}' "$temp_file" | grep -c "GB\|[0-9][0-9]MB\|[0-9][0-9][0-9]MB")
+                echo "Packages > 100MB: $large_packages"
+                echo "Packages > 10MB: $medium_packages"
+                echo
+                
+                echo "=== DATE ANALYSIS ==="
+                echo "Packages with available date info: $(awk -F'|' '$7 !~ /N\/A/ {count++} END {print count+0}' "$temp_file")"
+                echo "Packages missing date info: $(awk -F'|' '$7 ~ /N\/A/ {count++} END {print count+0}' "$temp_file")"
                 
                 rm "$temp_file"
             fi
 
             echo
-            echo "=== MAINTENANCE RECOMMENDATIONS ==="
-            echo "1. Run 'sudo apt upgrade' to update $(apt list --upgradable 2>/dev/null | grep -c upgradable) packages"
-            echo "2. Run 'sudo apt autoremove' to clean up unneeded packages"
-            echo "3. Run 'sudo apt autoclean' to clear package cache"
-            echo "4. Consider reviewing large packages for necessity"
-            echo "5. Check for security updates regularly"
+            echo "=== ENHANCED MAINTENANCE RECOMMENDATIONS ==="
+            echo "1. Run 'sudo apt upgrade' to update $upgradable_count packages"
+            echo "2. Check packages with large age differences for security implications"
+            echo "3. Run 'sudo apt autoremove' to clean up unneeded packages"
+            echo "4. Run 'sudo apt autoclean' to clear package cache"
+            echo "5. Consider reviewing packages without date information"
+            echo "6. Monitor packages from non-official sources"
+            echo "7. Set up automatic security updates for critical packages"
             echo
 
             echo "=========================================="
-            echo "Package inventory completed at $(date)"
+            echo "Enhanced package inventory completed at $(date)"
             echo "=========================================="
 
             echo
             echo "=== USEFUL FOLLOW-UP COMMANDS ==="
-            echo "# List all packages sorted by size:"
-            echo "dpkg-query -Wf '\${Installed-Size}\\t\${Package}\\t\${Version}\\n' | sort -nr"
+            echo "# Check package changelog for dates:"
+            echo "apt-cache changelog <package-name>"
             echo
-            echo "# Check specific package details:"
-            echo "apt show <package-name>"
+            echo "# Get detailed package dates:"
+            echo "apt-cache show <package-name> | grep Date"
             echo
-            echo "# See what files a package installed:"
-            echo "dpkg -L <package-name>"
+            echo "# List packages by installation date:"
+            echo "grep 'install ' /var/log/dpkg.log | tail -20"
             echo
-            echo "# Find which package owns a file:"
-            echo "dpkg -S /path/to/file"
+            echo "# Check specific package policy and dates:"
+            echo "apt-cache policy <package-name>"
+            echo
+            echo "# Find when a package was last updated:"
+            echo "stat /var/lib/dpkg/info/<package-name>.list"
 
       - name: Save Script Output
         if: always()
