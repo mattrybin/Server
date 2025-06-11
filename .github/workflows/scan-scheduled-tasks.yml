@@ -1,0 +1,217 @@
+name: Scheduled Tasks Audit
+
+on:
+  push:
+    branches: [development]
+
+jobs:
+  audit-scheduled-tasks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Scheduled Tasks Audit Script
+        id: run_audit_script_step
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            #!/bin/bash
+            # Complete Scheduled Tasks Audit Script
+            # Shows all cron jobs, systemd timers, and other scheduled tasks
+
+            echo "=========================================="
+            echo "    COMPLETE SCHEDULED TASKS AUDIT"
+            echo "=========================================="
+            echo "Generated at: $(date)"
+            echo
+
+            # Function to show file content with header
+            show_file() {
+                local file="$1"
+                local description="$2"
+                
+                if [ -f "$file" ] && [ -s "$file" ]; then
+                    echo "=== $description ==="
+                    echo "File: $file"
+                    echo "Last modified: $(stat -c %y "$file" 2>/dev/null || stat -f %Sm -t %F-%T "$file" 2>/dev/null)"
+                    echo "--- Content ---"
+                    cat "$file"
+                    echo
+                fi
+            }
+
+            # Function to show directory contents
+            show_cron_dir() {
+                local dir="$1"
+                local description="$2"
+                
+                if [ -d "$dir" ] && [ "$(ls -A "$dir" 2>/dev/null)" ]; then
+                    echo "=== $description ==="
+                    echo "Directory: $dir"
+                    for file_in_dir in "$dir"/*; do # Renamed 'file' to 'file_in_dir' to avoid conflict
+                        if [ -f "$file_in_dir" ]; then
+                            echo
+                            echo "--- File: $(basename "$file_in_dir") ---"
+                            echo "Last modified: $(stat -c %y "$file_in_dir" 2>/dev/null || stat -f %Sm -t %F-%T "$file_in_dir" 2>/dev/null)"
+                            cat "$file_in_dir"
+                            echo
+                        fi
+                    done
+                fi
+            }
+
+            echo "=========================================="
+            echo "           SYSTEMD TIMERS"
+            echo "=========================================="
+
+            echo "=== ACTIVE SYSTEMD TIMERS ==="
+            systemctl list-timers --all --no-pager
+            echo
+
+            echo "=== SYSTEMD TIMER DETAILS ==="
+            systemctl list-timers --all --no-pager | tail -n +2 | head -n -3 | awk '{print $1}' | while read timer; do
+                if [ -n "$timer" ] && [ "$timer" != "NEXT" ]; then
+                    echo "--- Timer: $timer ---"
+                    systemctl show "$timer" --property=Id,Description,NextElapseUSecRealtime,LastTriggerUSec,ActiveState,UnitFileState 2>/dev/null
+                    echo
+                fi
+            done
+
+            echo "=========================================="
+            echo "           SYSTEM CRON JOBS"
+            echo "=========================================="
+
+            # Main system crontab
+            show_file "/etc/crontab" "MAIN SYSTEM CRONTAB"
+
+            # System cron directories
+            show_cron_dir "/etc/cron.d" "SYSTEM CRON.D JOBS"
+            show_cron_dir "/etc/cron.hourly" "HOURLY CRON JOBS"
+            show_cron_dir "/etc/cron.daily" "DAILY CRON JOBS" 
+            show_cron_dir "/etc/cron.weekly" "WEEKLY CRON JOBS"
+            show_cron_dir "/etc/cron.monthly" "MONTHLY CRON JOBS"
+
+            echo "=========================================="
+            echo "            USER CRON JOBS"
+            echo "=========================================="
+
+            echo "=== CURRENT USER CRON JOBS ==="
+            echo "User: $(whoami)"
+            crontab -l 2>/dev/null || echo "No crontab for current user"
+            echo
+
+            echo "=== ALL USER CRON JOBS ==="
+            # Check for other users with crontabs
+            if [ -d "/var/spool/cron/crontabs" ]; then
+                for user_cron in /var/spool/cron/crontabs/*; do
+                    if [ -f "$user_cron" ]; then
+                        username=$(basename "$user_cron")
+                        echo "--- User: $username ---"
+                        echo "File: $user_cron"
+                        echo "Last modified: $(stat -c %y "$user_cron" 2>/dev/null || stat -f %Sm -t %F-%T "$user_cron" 2>/dev/null)"
+                        sudo cat "$user_cron" 2>/dev/null || echo "Cannot read crontab (permission denied)"
+                        echo
+                    fi
+                done
+            else
+                echo "No user crontabs directory found"
+            fi
+
+            echo "=========================================="
+            echo "             ANACRON JOBS"
+            echo "=========================================="
+
+            show_file "/etc/anacrontab" "ANACRON CONFIGURATION"
+
+            echo "=========================================="
+            echo "              AT JOBS"
+            echo "=========================================="
+
+            echo "=== AT QUEUE ==="
+            atq 2>/dev/null || echo "No at jobs scheduled or at command not available"
+            echo
+
+            echo "=== AT JOBS DETAILS ==="
+            atq_output=$(atq 2>/dev/null)
+            if [ -n "$atq_output" ]; then
+                echo "$atq_output" | while IFS= read -r line; do
+                    job_id=$(echo "$line" | awk '{print $1}')
+                    user=$(echo "$line" | awk '{print $3}') # Adjusted to get user correctly
+                    date_str=$(echo "$line" | awk '{print $4, $5, $6}') # Adjusted to get date and time
+                    if [ -n "$job_id" ] && [ "$job_id" != "no" ]; then
+                        echo "--- Job ID: $job_id (User: $user, Date: $date_str) ---"
+                        at -c "$job_id" 2>/dev/null | tail -n 20 || echo "Cannot read job details"
+                        echo
+                    fi
+                done
+            fi
+
+            echo "=========================================="
+            echo "           SYSTEMD SERVICES"
+            echo "         (with Timer dependency)"
+            echo "=========================================="
+
+            echo "=== SERVICES TRIGGERED BY TIMERS ==="
+            systemctl list-timers --all --no-pager | tail -n +2 | head -n -3 | awk '{print $NF}' | while read service; do
+                if [ -n "$service" ] && [ "$service" != "ACTIVATES" ]; then
+                    echo "--- Service: $service ---"
+                    systemctl show "$service" --property=Id,Description,Type,ExecStart --no-pager 2>/dev/null
+                    echo
+                fi
+            done
+
+            echo "=========================================="
+            echo "      SCHEDULED TASKS SUMMARY"
+            echo "=========================================="
+
+            echo "=== COUNTS ==="
+            echo "Active systemd timers: $(systemctl list-timers --state=active --no-legend 2>/dev/null | wc -l)"
+            echo "System cron files: $(find /etc/cron.d /etc/cron.{hourly,daily,weekly,monthly} -type f 2>/dev/null | wc -l)"
+            echo "User crontabs: $(find /var/spool/cron/crontabs -type f 2>/dev/null | wc -l)"
+            echo "At jobs: $(atq 2>/dev/null | wc -l)"
+
+            echo
+            echo "=== NEXT 5 SCHEDULED EVENTS ==="
+            {
+                # Get systemd timer next runs
+                systemctl list-timers --no-legend 2>/dev/null | head -5 | awk '{print $1 " " $2 " " $3 " " $4 " (systemd timer)"}'
+                
+                # Get at jobs
+                atq 2>/dev/null | head -5 | awk '{print $2 " " $3 " " $4 " " $5 " " $6 " (at job)"}' # Adjusted to include year potentially
+            } | sort
+
+            echo
+            echo "=========================================="
+            echo "Scheduled tasks audit completed at $(date)"
+            echo "=========================================="
+
+      - name: Save Script Output
+        if: always()
+        run: |
+          echo "Saving script stdout to scheduled_tasks_audit_output.txt"
+          echo "${{ steps.run_audit_script_step.outputs.stdout }}" > scheduled_tasks_audit_output.txt
+          echo "Saving script stderr to scheduled_tasks_audit_error.txt"
+          echo "${{ steps.run_audit_script_step.outputs.stderr }}" > scheduled_tasks_audit_error.txt
+          touch scheduled_tasks_audit_output.txt scheduled_tasks_audit_error.txt
+
+      - name: Upload Audit Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-tasks-audit-results-${{ github.run_number }}
+          path: |
+            scheduled_tasks_audit_output.txt
+            scheduled_tasks_audit_error.txt
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Scheduled Tasks Audit scan failed. Check the logs for details."
+          echo "::error::Scheduled Tasks Audit workflow failed"
