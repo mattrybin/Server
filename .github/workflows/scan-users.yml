@@ -1,0 +1,174 @@
+name: Comprehensive User System Scan
+on:
+  push:
+    branches: [development]
+
+jobs:
+  user-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Comprehensive User Information Scan
+        id: scan_users
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          timeout: 300s
+          script: |
+            echo "=== COMPREHENSIVE USER SYSTEM SCAN ==="
+            echo "Scan Date: $(date)"
+            echo "Hostname: $(hostname)"
+            echo "System: $(uname -a)"
+            echo ""
+            
+            echo "=== CURRENT SESSION INFO ==="
+            echo "Current user: $(whoami)"
+            echo "User ID and groups: $(id)"
+            echo "Current working directory: $(pwd)"
+            echo ""
+            
+            echo "=== ALL SYSTEM USERS ==="
+            echo "Total users in system:"
+            getent passwd | wc -l
+            echo ""
+            echo "All users (username:UID:GID:home:shell):"
+            getent passwd | cut -d: -f1,3,4,6,7 | sort -t: -k2 -n
+            echo ""
+            
+            echo "=== USER CATEGORIES ==="
+            echo "System users (UID < 1000):"
+            awk -F: '($3 < 1000) {printf "%-20s UID: %-6s Home: %-25s Shell: %s\n", $1, $3, $6, $7}' /etc/passwd | sort -k3 -n
+            echo ""
+            echo "Regular users (UID >= 1000):"
+            awk -F: '($3 >= 1000) {printf "%-20s UID: %-6s Home: %-25s Shell: %s\n", $1, $3, $6, $7}' /etc/passwd | sort -k3 -n
+            echo ""
+            
+            echo "=== USER HOME DIRECTORIES ==="
+            if [ -d "/home" ]; then
+                echo "Home directories in /home:"
+                ls -la /home/ 2>/dev/null || echo "Cannot access /home directory"
+            fi
+            echo ""
+            
+            echo "=== GROUPS INFORMATION ==="
+            echo "Total groups in system:"
+            getent group | wc -l
+            echo ""
+            echo "All groups (name:GID:members):"
+            getent group | cut -d: -f1,3,4 | sort -t: -k2 -n | head -20
+            echo "... (showing first 20 groups)"
+            echo ""
+            
+            echo "=== CURRENTLY LOGGED IN USERS ==="
+            echo "Active sessions (who):"
+            who 2>/dev/null || echo "No active sessions or command unavailable"
+            echo ""
+            echo "Detailed session info (w):"
+            w 2>/dev/null || echo "Command unavailable"
+            echo ""
+            echo "All logged in users (users):"
+            users 2>/dev/null || echo "Command unavailable"
+            echo ""
+            
+            echo "=== LOGIN HISTORY ==="
+            echo "Recent login history (last 10):"
+            last -n 10 2>/dev/null || echo "Last command unavailable"
+            echo ""
+            echo "Last login times for all users:"
+            lastlog 2>/dev/null | head -20 || echo "Lastlog command unavailable or insufficient permissions"
+            echo ""
+            echo "Root user last login:"
+            lastlog -u root 2>/dev/null || echo "Cannot access root login info"
+            echo ""
+            
+            echo "=== SUDO USERS ==="
+            echo "Users in sudo group:"
+            getent group sudo 2>/dev/null | cut -d: -f4 || echo "Sudo group not found"
+            echo ""
+            echo "Users in wheel group:"
+            getent group wheel 2>/dev/null | cut -d: -f4 || echo "Wheel group not found"
+            echo ""
+            
+            echo "=== USER PROCESSES ==="
+            echo "Running processes by user (top 10):"
+            ps aux --sort=-%cpu | head -11 | awk '{print $1, $2, $3, $4, $11}' | column -t
+            echo ""
+            echo "Process count by user:"
+            ps aux | awk 'NR>1 {count[$1]++} END {for (user in count) print user, count[user]}' | sort -k2 -nr | head -10
+            echo ""
+            
+            echo "=== SYSTEMD USER SESSIONS ==="
+            if command -v loginctl >/dev/null 2>&1; then
+                echo "Systemd user sessions:"
+                loginctl list-users 2>/dev/null || echo "No user sessions or insufficient permissions"
+                echo ""
+                echo "User session details:"
+                loginctl list-sessions 2>/dev/null || echo "No sessions or insufficient permissions"
+            else
+                echo "Systemd loginctl not available"
+            fi
+            echo ""
+            
+            echo "=== PASSWORD POLICIES ==="
+            echo "Password aging info (if accessible):"
+            if [ -r /etc/shadow ]; then
+                echo "Users with password info:"
+                awk -F: '($2 != "*" && $2 != "!") {print $1}' /etc/shadow | head -10
+            else
+                echo "Cannot access /etc/shadow (insufficient permissions)"
+            fi
+            echo ""
+            
+            echo "=== USER SHELLS ==="
+            echo "Available shells:"
+            cat /etc/shells 2>/dev/null || echo "Cannot access /etc/shells"
+            echo ""
+            echo "Shell usage by users:"
+            awk -F: '{shells[$7]++} END {for (shell in shells) printf "%-20s %d users\n", shell, shells[shell]}' /etc/passwd | sort -k2 -nr
+            echo ""
+            
+            echo "=== SYSTEM STATS ==="
+            echo "System uptime:"
+            uptime
+            echo ""
+            echo "Memory usage:"
+            free -h
+            echo ""
+            echo "Disk usage for /home:"
+            du -sh /home/* 2>/dev/null | head -10 || echo "Cannot access home directories"
+            echo ""
+            
+            echo "=== SECURITY INFO ==="
+            echo "Failed login attempts (if available):"
+            if [ -f /var/log/auth.log ]; then
+                grep "Failed password" /var/log/auth.log 2>/dev/null | tail -5 || echo "No recent failed logins"
+            elif [ -f /var/log/secure ]; then
+                grep "Failed password" /var/log/secure 2>/dev/null | tail -5 || echo "No recent failed logins"
+            else
+                echo "Auth logs not accessible"
+            fi
+            echo ""
+            
+            echo "=== SCAN COMPLETE ==="
+            echo "Scan completed at: $(date)"
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: user-scan-results-${{ github.run_number }}
+          path: |
+            ${{ github.workspace }}
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "User scan failed. Check the logs for details."
+          echo "::error::User scanning workflow failed"
