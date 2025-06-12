@@ -23,12 +23,23 @@ jobs:
           script: |
             #!/bin/bash
             set -eo pipefail # Exit on error, treat unset variables as error, propagate pipeline errors
+            
+            # Ensure jq is installed
+            if ! command -v jq &> /dev/null; then
+              echo "jq not found. Installing jq..." >&2
+              sudo apt-get update >/dev/null 2>&1
+              sudo apt-get install -y jq >/dev/null 2>&1
+              echo "jq installed." >&2
+            else
+              echo "jq is already installed." >&2
+            fi
+
             TMP_JSON_FILE=$(mktemp) # Use a temporary file on the remote server for the JSON output
 
             # Informational messages go to stderr
-            echo "Updating package cache..." >&2
+            echo "Updating package cache (apt update)..." >&2 # Clarified apt update
             sudo apt update >/dev/null 2>&1
-            echo "Cache updated." >&2
+            echo "Package cache updated." >&2
 
             echo "Generating package list in JSON format..." >&2
 
