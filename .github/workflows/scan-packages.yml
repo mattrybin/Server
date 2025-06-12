@@ -63,14 +63,9 @@ jobs:
                   echo "Progress: $COUNTER/$TOTAL_PACKAGES packages processed..." >&2
                 fi
 
-                # Get package details individually
-                pkg_info=$(dpkg-query -W -f='${Version}\t${Installed-Size}\t${Description}' "$pkg_name" 2>/dev/null || true)
-                
-                # Parse the info
-                inst_ver=$(echo "$pkg_info" | cut -f1)
-                size_kb_str=$(echo "$pkg_info" | cut -f2)
-                # Get only the first line of description
-                desc=$(echo "$pkg_info" | cut -f3- | head -n1)
+                # Get package details individually - query each field separately to avoid parsing issues
+                inst_ver=$(dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || true)
+                size_kb_str=$(dpkg-query -W -f='${Installed-Size}' "$pkg_name" 2>/dev/null || true)
 
                 # Get available version with error handling
                 avail_ver_output=""
@@ -93,14 +88,13 @@ jobs:
                   size_kb_jq_val="null"
                 fi
                 
-                # Output JSON object for this package
+                # Output JSON object for this package (without description)
                 jq -c -n \
                   --arg pn "$pkg_name" \
                   --arg iv "$inst_ver" \
                   --argjson av "$avail_ver_jq_val" \
                   --argjson skb "$size_kb_jq_val" \
-                  --arg dsc "$desc" \
-                  '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
+                  '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb}'
               done
               
               echo "All $COUNTER packages processed successfully." >&2
