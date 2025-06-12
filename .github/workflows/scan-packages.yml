@@ -48,10 +48,23 @@ jobs:
             # The final array is written to TMP_JSON_FILE
             dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description}\n' | \
             while IFS=$'\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do # Process last line even if no trailing newline
-              if [ -z "$pkg_name" ]; then continue; fi # Skip empty lines, if any
+              echo "--- Debug: Processing package ---" >&2
+              echo "Debug: pkg_name='${pkg_name}'" >&2
+              echo "Debug: inst_ver='${inst_ver}'" >&2
+              echo "Debug: size_kb_str='${size_kb_str}'" >&2
+              # Be careful with desc as it can be multi-line or contain special chars
+              echo "Debug: desc (first 50 chars)='$(echo "$desc" | head -c 50)'" >&2
+
+
+              if [ -z "$pkg_name" ]; then
+                echo "Debug: Skipping empty pkg_name." >&2
+                continue
+              fi
 
               # Get available version using apt-cache policy
+              echo "Debug: Running apt-cache policy for '${pkg_name}'" >&2
               avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+              echo "Debug: avail_ver_output='${avail_ver_output}'" >&2
 
               avail_ver_jq_val="" # Initialize to prevent issues if not set in conditional
               if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
@@ -61,6 +74,7 @@ jobs:
                 # Otherwise, store as JSON null
                 avail_ver_jq_val="null"
               fi
+              echo "Debug: avail_ver_jq_val='${avail_ver_jq_val}'" >&2
 
               # Ensure size_kb is a number for jq; default to null if not a valid number
               size_kb_jq_val="" # Initialize
@@ -69,6 +83,10 @@ jobs:
               else
                 size_kb_jq_val="null" # Store as JSON null if not a plain number
               fi
+              echo "Debug: size_kb_jq_val='${size_kb_jq_val}'" >&2
+              
+              jq_command_str="jq -c -n --arg pn \"$pkg_name\" --arg iv \"$inst_ver\" --argjson av \"$avail_ver_jq_val\" --argjson skb \"$size_kb_jq_val\" --arg dsc \"$desc\" '{package_name: \$pn, installed_version: \$iv, available_version: \$av, size_kb: \$skb, description: \$dsc}'"
+              echo "Debug: Constructed jq command: ${jq_command_str}" >&2
 
               # Use jq to construct a compact JSON object for the current package
               # --arg handles proper escaping for string values (pkg_name, inst_ver, desc)
@@ -80,6 +98,7 @@ jobs:
                 --argjson skb "$size_kb_jq_val" \
                 --arg dsc "$desc" \
                 '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
+              echo "Debug: jq command for package '${pkg_name}' completed." >&2
             done | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
             # The `jq -s 'if length == 0 then [] else . end'` ensures output is always a valid JSON array,
             # even if no packages are found (results in "[]").
