@@ -13,160 +13,91 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create Package Inventory Script
-        run: |
-          cat > package_inventory.sh << 'EOF'
-          #!/bin/bash
-          set -o pipefail
-          
-          # Ensure jq is installed
-          if ! command -v jq &> /dev/null; then
-            echo "jq not found. Installing jq..."
-            sudo apt-get update >/dev/null 2>&1
-            sudo apt-get install -y jq >/dev/null 2>&1
-            echo "jq installed."
-          else
-            echo "jq is already installed."
-          fi
-
-          # Update package cache
-          echo "Updating package cache (apt update)..."
-          sudo apt update >/dev/null 2>&1
-          echo "Package cache updated."
-
-          echo "Generating package list in JSON format..."
-
-          # Count total packages
-          TOTAL_PACKAGES=$(dpkg-query -W -f='${Package}\n' | wc -l)
-          echo "Total packages to process: $TOTAL_PACKAGES"
-          
-          # Generate JSON
-          COUNTER=0
-          TEMP_FILE=$(mktemp)
-          
-          # Process each package
-          dpkg-query -W -f='${Package}\n' | while read -r pkg_name; do
-            if [ -z "$pkg_name" ]; then
-              continue
-            fi
-
-            COUNTER=$((COUNTER + 1))
-            
-            # Show progress
-            if [ $((COUNTER % 50)) -eq 0 ]; then
-              echo "Progress: $COUNTER/$TOTAL_PACKAGES packages processed..."
-            fi
-
-            # Get package details
-            inst_ver=$(dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || echo "")
-            size_kb_str=$(dpkg-query -W -f='${Installed-Size}' "$pkg_name" 2>/dev/null || echo "")
-
-            # Get available version
-            avail_ver_output=""
-            apt_cache_output=$(apt-cache policy "$pkg_name" 2>/dev/null || true)
-            if [ -n "$apt_cache_output" ]; then
-              avail_ver_output=$(echo "$apt_cache_output" | grep "Candidate:" | awk '{print $2}' || true)
-            fi
-
-            # Prepare JSON values
-            if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
-              avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
-            else
-              avail_ver_jq_val="null"
-            fi
-
-            if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
-              size_kb_jq_val="$size_kb_str"
-            else
-              size_kb_jq_val="null"
-            fi
-            
-            # Output JSON object
-            jq -c -n \
-              --arg pn "$pkg_name" \
-              --arg iv "$inst_ver" \
-              --argjson av "$avail_ver_jq_val" \
-              --argjson skb "$size_kb_jq_val" \
-              '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb}'
-          done > "$TEMP_FILE"
-          
-          # Convert to JSON array and save
-          jq -s '.' "$TEMP_FILE" > packages.json
-          rm -f "$TEMP_FILE"
-          
-          echo "Package list generated successfully."
-          echo "File size: $(wc -c < packages.json) bytes"
-          echo "Package count: $(jq 'length' packages.json)"
-          EOF
-          
-          chmod +x package_inventory.sh
-
-      - name: Upload Script to Server
-        uses: appleboy/scp-action@v0.1.5
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          source: "package_inventory.sh"
-          target: "/tmp/"
-
-      - name: Execute Script on Server
+      - name: Generate Package JSON
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SERVER_PASSWORD }}
           script: |
-            cd /tmp
-            chmod +x package_inventory.sh
-            ./package_inventory.sh
+            #!/bin/bash
+            set -o pipefail
+            
+            # Ensure jq is installed
+            if ! command -v jq &> /dev/null; then
+              echo "jq not found. Installing jq..."
+              sudo apt-get update >/dev/null 2>&1
+              sudo apt-get install -y jq >/dev/null 2>&1
+              echo "jq installed."
+            else
+              echo "jq is already installed."
+            fi
 
-      - name: Download Generated JSON
-        uses: appleboy/scp-action@v0.1.5
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          source: "/tmp/packages.json"
-          target: "."
-          strip_components: 1
+            # Update package cache
+            echo "Updating package cache (apt update)..."
+            sudo apt update >/dev/null 2>&1
+            echo "Package cache updated."
 
-      - name: Cleanup Server Files
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          script: |
-            rm -f /tmp/package_inventory.sh /tmp/packages.json
+            echo "Generating package list in JSON format..."
 
-      - name: Validate JSON
-        run: |
-          echo "File size: $(wc -c < packages.json) bytes"
-          
-          echo "JSON validation check:"
-          if jq empty packages.json 2>/dev/null; then
-            echo "✓ Valid JSON"
-            echo "Package count: $(jq 'length' packages.json)"
-            echo "Sample packages (first 3):"
-            jq '.[0:3]' packages.json 2>/dev/null || echo "No packages found"
-          else
-            echo "✗ Invalid JSON detected!"
-            echo "First 1000 characters:"
-            head -c 1000 packages.json
-            exit 1
-          fi
+            # Count total packages for progress reporting
+            TOTAL_PACKAGES=$(dpkg-query -W -f='${Package}\n' | wc -l)
+            echo "Total packages to process: $TOTAL_PACKAGES"
+            
+            # Generate JSON using a more reliable approach
+            COUNTER=0
+            OUTPUT_FILE="/tmp/packages_inventory.json"
+            
+            {
+              dpkg-query -W -f='${Package}\n' | while read -r pkg_name; do
+                if [ -z "$pkg_name" ]; then
+                  continue
+                fi
 
-      - name: Upload Package JSON
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-inventory-${{ github.run_number }}
-          path: packages.json
-          retention-days: 30
+                COUNTER=$((COUNTER + 1))
+                
+                # Show progress every 50 packages
+                if [ $((COUNTER % 50)) -eq 0 ]; then
+                  echo "Progress: $COUNTER/$TOTAL_PACKAGES packages processed..." >&2
+                fi
 
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "Simplified Package Inventory generation failed. Check the logs for details."
-          echo "::error::Simplified Package Inventory workflow failed"
+                # Get package details individually
+                inst_ver=$(dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || echo "")
+                size_kb_str=$(dpkg-query -W -f='${Installed-Size}' "$pkg_name" 2>/dev/null || echo "")
+
+                # Get available version
+                avail_ver_output=""
+                apt_cache_output=$(apt-cache policy "$pkg_name" 2>/dev/null || true)
+                if [ -n "$apt_cache_output" ]; then
+                  avail_ver_output=$(echo "$apt_cache_output" | grep "Candidate:" | awk '{print $2}' || true)
+                fi
+
+                # Prepare JSON values
+                if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
+                  avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
+                else
+                  avail_ver_jq_val="null"
+                fi
+
+                if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
+                  size_kb_jq_val="$size_kb_str"
+                else
+                  size_kb_jq_val="null"
+                fi
+                
+                # Output JSON object
+                jq -c -n \
+                  --arg pn "$pkg_name" \
+                  --arg iv "$inst_ver" \
+                  --argjson av "$avail_ver_jq_val" \
+                  --argjson skb "$size_kb_jq_val" \
+                  '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb}'
+              done
+              
+              echo "All $COUNTER packages processed successfully." >&2
+            } | jq -s '.' > "$OUTPUT_FILE"
+
+            echo "Package list generated successfully."
+            echo "Output file: $OUTPUT_FILE"
+            echo "File size: $(wc -c < "$OUTPUT_FILE") bytes"
+            echo "Package count: $(jq 'length' "$OUTPUT_FILE")"
