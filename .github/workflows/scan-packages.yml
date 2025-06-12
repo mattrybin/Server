@@ -22,7 +22,6 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           script: |
             #!/bin/bash
-            # Note: Removed 'set -e' to prevent premature exits from arithmetic operations
             set -o pipefail
             
             # Ensure jq is installed
@@ -48,22 +47,30 @@ jobs:
             TOTAL_PACKAGES=$(dpkg-query -W -f='${Package}\n' | wc -l)
             echo "Total packages to process: $TOTAL_PACKAGES" >&2
             
-            # Generate JSON objects for each package
-            dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description}\n' | \
-            awk -F'\t' 'BEGIN{OFS="\t"} {gsub(/\r?\n/, " ", $4); print $1, $2, $3, $4}' | \
+            # Generate JSON using a more reliable approach
+            # Process each package individually to avoid multi-line issues
+            COUNTER=0
             {
-              COUNTER=0
-              while IFS=$'\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do
+              dpkg-query -W -f='${Package}\n' | while read -r pkg_name; do
                 if [ -z "$pkg_name" ]; then
                   continue
                 fi
 
                 COUNTER=$((COUNTER + 1))
                 
-                # Show progress every 100 packages
-                if [ $((COUNTER % 100)) -eq 0 ]; then
+                # Show progress every 50 packages
+                if [ $((COUNTER % 50)) -eq 0 ]; then
                   echo "Progress: $COUNTER/$TOTAL_PACKAGES packages processed..." >&2
                 fi
+
+                # Get package details individually
+                pkg_info=$(dpkg-query -W -f='${Version}\t${Installed-Size}\t${Description}' "$pkg_name" 2>/dev/null || true)
+                
+                # Parse the info
+                inst_ver=$(echo "$pkg_info" | cut -f1)
+                size_kb_str=$(echo "$pkg_info" | cut -f2)
+                # Get only the first line of description
+                desc=$(echo "$pkg_info" | cut -f3- | head -n1)
 
                 # Get available version with error handling
                 avail_ver_output=""
@@ -95,7 +102,8 @@ jobs:
                   --arg dsc "$desc" \
                   '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
               done
-              echo "All packages processed successfully." >&2
+              
+              echo "All $COUNTER packages processed successfully." >&2
             } | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
 
             echo "Package list generated on remote server." >&2
@@ -118,8 +126,8 @@ jobs:
           if jq empty packages.json 2>/dev/null; then
             echo "✓ Valid JSON"
             echo "Package count: $(jq 'length' packages.json)"
-            echo "Sample package:"
-            jq '.[0]' packages.json 2>/dev/null || echo "No packages found"
+            echo "Sample packages (first 3):"
+            jq '.[0:3]' packages.json 2>/dev/null || echo "No packages found"
           else
             echo "✗ Invalid JSON detected!"
             echo "First 1000 characters:"
