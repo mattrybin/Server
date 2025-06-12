@@ -47,6 +47,7 @@ jobs:
             # This stream is then piped to jq -s to collect them into a single JSON array
             # The final array is written to TMP_JSON_FILE
             dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description}\n' | \
+            awk -F'\t' 'BEGIN{OFS="\t"} {gsub(/\r?\n/, " ", $4); print $1, $2, $3, $4}' | \
             while IFS=$'\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do # Process last line even if no trailing newline
               echo "--- Debug: Processing package ---" >&2
               echo "Debug: pkg_name='${pkg_name}'" >&2
