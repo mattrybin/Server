@@ -14,7 +14,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Generate Package JSON
-        id: scan_packages_step
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -26,30 +25,29 @@ jobs:
             
             # Ensure jq is installed
             if ! command -v jq &> /dev/null; then
-              echo "jq not found. Installing jq..." >&2
+              echo "jq not found. Installing jq..."
               sudo apt-get update >/dev/null 2>&1
               sudo apt-get install -y jq >/dev/null 2>&1
-              echo "jq installed." >&2
+              echo "jq installed."
             else
-              echo "jq is already installed." >&2
+              echo "jq is already installed."
             fi
 
-            TMP_JSON_FILE=$(mktemp)
-
             # Update package cache
-            echo "Updating package cache (apt update)..." >&2
+            echo "Updating package cache (apt update)..."
             sudo apt update >/dev/null 2>&1
-            echo "Package cache updated." >&2
+            echo "Package cache updated."
 
-            echo "Generating package list in JSON format..." >&2
+            echo "Generating package list in JSON format..."
 
             # Count total packages for progress reporting
             TOTAL_PACKAGES=$(dpkg-query -W -f='${Package}\n' | wc -l)
-            echo "Total packages to process: $TOTAL_PACKAGES" >&2
+            echo "Total packages to process: $TOTAL_PACKAGES"
             
             # Generate JSON using a more reliable approach
-            # Process each package individually to avoid multi-line issues
             COUNTER=0
+            OUTPUT_FILE="/tmp/packages_inventory.json"
+            
             {
               dpkg-query -W -f='${Package}\n' | while read -r pkg_name; do
                 if [ -z "$pkg_name" ]; then
@@ -63,32 +61,31 @@ jobs:
                   echo "Progress: $COUNTER/$TOTAL_PACKAGES packages processed..." >&2
                 fi
 
-                # Get package details individually - query each field separately to avoid parsing issues
-                inst_ver=$(dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || true)
-                size_kb_str=$(dpkg-query -W -f='${Installed-Size}' "$pkg_name" 2>/dev/null || true)
+                # Get package details individually
+                inst_ver=$(dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || echo "")
+                size_kb_str=$(dpkg-query -W -f='${Installed-Size}' "$pkg_name" 2>/dev/null || echo "")
 
-                # Get available version with error handling
+                # Get available version
                 avail_ver_output=""
                 apt_cache_output=$(apt-cache policy "$pkg_name" 2>/dev/null || true)
                 if [ -n "$apt_cache_output" ]; then
                   avail_ver_output=$(echo "$apt_cache_output" | grep "Candidate:" | awk '{print $2}' || true)
                 fi
 
-                # Prepare available version for JSON
+                # Prepare JSON values
                 if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
                   avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
                 else
                   avail_ver_jq_val="null"
                 fi
 
-                # Prepare size_kb for JSON
                 if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
                   size_kb_jq_val="$size_kb_str"
                 else
                   size_kb_jq_val="null"
                 fi
                 
-                # Output JSON object for this package (without description)
+                # Output JSON object
                 jq -c -n \
                   --arg pn "$pkg_name" \
                   --arg iv "$inst_ver" \
@@ -98,21 +95,27 @@ jobs:
               done
               
               echo "All $COUNTER packages processed successfully." >&2
-            } | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
+            } | jq -s '.' > "$OUTPUT_FILE"
 
-            echo "Package list generated on remote server." >&2
+            echo "Package list generated successfully."
+            echo "Output file: $OUTPUT_FILE"
+            echo "File size: $(wc -c < "$OUTPUT_FILE") bytes"
+            echo "Package count: $(jq 'length' "$OUTPUT_FILE")"
 
-            # Output the JSON content
-            cat "$TMP_JSON_FILE"
+      - name: Download Package JSON
+        uses: appleboy/scp-action@v0.1.5
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          source: "/tmp/packages_inventory.json"
+          target: "."
+          strip_components: 1
 
-            # Clean up
-            rm -f "$TMP_JSON_FILE"
-
-      - name: Save Package JSON to Runner
+      - name: Rename and Validate JSON
         run: |
-          echo "Saving script stdout to packages.json on the runner..."
-          # Use printf with %s to preserve exact content
-          printf '%s' "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
+          echo "Moving downloaded file to packages.json..."
+          mv packages_inventory.json packages.json
           
           echo "File size: $(wc -c < packages.json) bytes"
           
@@ -126,11 +129,17 @@ jobs:
             echo "✗ Invalid JSON detected!"
             echo "First 1000 characters:"
             head -c 1000 packages.json
-            echo
-            echo "Last 1000 characters:"
-            tail -c 1000 packages.json
             exit 1
           fi
+
+      - name: Cleanup Remote File
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            rm -f /tmp/packages_inventory.json
 
       - name: Upload Package JSON
         if: always()
