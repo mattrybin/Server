@@ -53,7 +53,7 @@ jobs:
               # Get available version using apt-cache policy
               avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
 
-              local avail_ver_jq_val
+              avail_ver_jq_val="" # Initialize to prevent issues if not set in conditional
               if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
                 # If available_version exists and is not "(none)", store it as a JSON string
                 avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
@@ -63,7 +63,7 @@ jobs:
               fi
 
               # Ensure size_kb is a number for jq; default to null if not a valid number
-              local size_kb_jq_val
+              size_kb_jq_val="" # Initialize
               if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
                 size_kb_jq_val="$size_kb_str" # Already a number string, jq --argjson will handle
               else
