@@ -115,10 +115,20 @@ jobs:
       - name: Save Package JSON to Runner
         run: |
           echo "Saving script stdout to packages.json on the runner..."
-          echo "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
+          # Use printf with %s to preserve the exact content without interpretation
+          printf '%s' "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
           echo "Contents of packages.json (first 500 characters):"
           head -c 500 packages.json
           echo
+          echo
+          echo "JSON validation check:"
+          if jq empty packages.json 2>/dev/null; then
+            echo "✓ Valid JSON"
+            echo "Package count: $(jq 'length' packages.json)"
+          else
+            echo "✗ Invalid JSON detected!"
+            exit 1
+          fi
 
       - name: Upload Package JSON
         if: always()
