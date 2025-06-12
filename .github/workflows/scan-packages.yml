@@ -1,4 +1,5 @@
-name: Simplified Package Inventory
+dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description-First}\n' | \
+            while IFS=name: Simplified Package Inventory
 
 on:
   push:
@@ -46,9 +47,351 @@ jobs:
             # Main logic to generate a stream of JSON objects, one per package
             # This stream is then piped to jq -s to collect them into a single JSON array
             # The final array is written to TMP_JSON_FILE
-            dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description}\n' | \
-            awk -F'\t' 'BEGIN{OFS="\t"} {gsub(/\r?\n/, " ", $4); print $1, $2, $3, $4}' | \
-            while IFS=$'\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do # Process last line even if no trailing newline
+            # Use ${Description-First} to get only the first line of the description
+            dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description-First}\n' | \
+            while IFS=
+              echo "--- Debug: Processing package ---" >&2
+              echo "Debug: pkg_name='${pkg_name}'" >&2
+              echo "Debug: inst_ver='${inst_ver}'" >&2
+              echo "Debug: size_kb_str='${size_kb_str}'" >&2
+              # Be careful with desc as it can be multi-line or contain special chars
+              echo "Debug: desc (first 50 chars)='$(echo "$desc" | head -c 50)'" >&2
+
+
+              if [ -z "$pkg_name" ]; then
+                echo "Debug: Skipping empty pkg_name." >&2
+                continue
+              fi
+
+              # Get available version using apt-cache policy
+              echo "Debug: Running apt-cache policy for '${pkg_name}'" >&2
+              avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+              echo "Debug: avail_ver_output='${avail_ver_output}'" >&2
+
+              avail_ver_jq_val="" # Initialize to prevent issues if not set in conditional
+              if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
+                # If available_version exists and is not "(none)", store it as a JSON string
+                avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
+              else
+                # Otherwise, store as JSON null
+                avail_ver_jq_val="null"
+              fi
+              echo "Debug: avail_ver_jq_val='${avail_ver_jq_val}'" >&2
+
+              # Ensure size_kb is a number for jq; default to null if not a valid number
+              size_kb_jq_val="" # Initialize
+              if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
+                size_kb_jq_val="$size_kb_str" # Already a number string, jq --argjson will handle
+              else
+                size_kb_jq_val="null" # Store as JSON null if not a plain number
+              fi
+              echo "Debug: size_kb_jq_val='${size_kb_jq_val}'" >&2
+              
+              jq_command_str="jq -c -n --arg pn \"$pkg_name\" --arg iv \"$inst_ver\" --argjson av \"$avail_ver_jq_val\" --argjson skb \"$size_kb_jq_val\" --arg dsc \"$desc\" '{package_name: \$pn, installed_version: \$iv, available_version: \$av, size_kb: \$skb, description: \$dsc}'"
+              echo "Debug: Constructed jq command: ${jq_command_str}" >&2
+
+              # Use jq to construct a compact JSON object for the current package
+              # --arg handles proper escaping for string values (pkg_name, inst_ver, desc)
+              # --argjson handles values that are already valid JSON (avail_ver_jq_val, size_kb_jq_val)
+              jq -c -n \
+                --arg pn "$pkg_name" \
+                --arg iv "$inst_ver" \
+                --argjson av "$avail_ver_jq_val" \
+                --argjson skb "$size_kb_jq_val" \
+                --arg dsc "$desc" \
+                '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
+              echo "Debug: jq command for package '${pkg_name}' completed." >&2
+            done | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
+            # The `jq -s 'if length == 0 then [] else . end'` ensures output is always a valid JSON array,
+            # even if no packages are found (results in "[]").
+
+            echo "Package list generated on remote server." >&2
+
+            # Output the content of the temporary JSON file to stdout
+            cat "$TMP_JSON_FILE"
+
+            # Clean up the temporary file on the remote server
+            rm "$TMP_JSON_FILE"
+
+      - name: Save Package JSON to Runner
+        run: |
+          echo "Saving script stdout to packages.json on the runner..."
+          # Use printf with %s to preserve the exact content without interpretation
+          printf '%s' "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
+          echo "Contents of packages.json (first 500 characters):"
+          head -c 500 packages.json
+          echo
+          echo
+          echo "JSON validation check:"
+          if jq empty packages.json 2>/dev/null; then
+            echo "✓ Valid JSON"
+            echo "Package count: $(jq 'length' packages.json)"
+          else
+            echo "✗ Invalid JSON detected!"
+            exit 1
+          fi
+
+      - name: Upload Package JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-inventory-${{ github.run_number }}
+          path: packages.json
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Simplified Package Inventory generation failed. Check the logs for details."
+          echo "::error::Simplified Package Inventory workflow failed"\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do # Process last line even if no trailing newline
+              echo "--- Debug: Processing package ---" >&2
+              echo "Debug: pkg_name='${pkg_name}'" >&2
+              echo "Debug: inst_ver='${inst_ver}'" >&2
+              echo "Debug: size_kb_str='${size_kb_str}'" >&2
+              # Be careful with desc as it can be multi-line or contain special chars
+              echo "Debug: desc (first 50 chars)='$(echo "$desc" | head -c 50)'" >&2
+
+
+              if [ -z "$pkg_name" ]; then
+                echo "Debug: Skipping empty pkg_name." >&2
+                continue
+              fi
+
+              # Get available version using apt-cache policy
+              echo "Debug: Running apt-cache policy for '${pkg_name}'" >&2
+              avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+              echo "Debug: avail_ver_output='${avail_ver_output}'" >&2
+
+              avail_ver_jq_val="" # Initialize to prevent issues if not set in conditional
+              if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
+                # If available_version exists and is not "(none)", store it as a JSON string
+                avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
+              else
+                # Otherwise, store as JSON null
+                avail_ver_jq_val="null"
+              fi
+              echo "Debug: avail_ver_jq_val='${avail_ver_jq_val}'" >&2
+
+              # Ensure size_kb is a number for jq; default to null if not a valid number
+              size_kb_jq_val="" # Initialize
+              if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
+                size_kb_jq_val="$size_kb_str" # Already a number string, jq --argjson will handle
+              else
+                size_kb_jq_val="null" # Store as JSON null if not a plain number
+              fi
+              echo "Debug: size_kb_jq_val='${size_kb_jq_val}'" >&2
+              
+              jq_command_str="jq -c -n --arg pn \"$pkg_name\" --arg iv \"$inst_ver\" --argjson av \"$avail_ver_jq_val\" --argjson skb \"$size_kb_jq_val\" --arg dsc \"$desc\" '{package_name: \$pn, installed_version: \$iv, available_version: \$av, size_kb: \$skb, description: \$dsc}'"
+              echo "Debug: Constructed jq command: ${jq_command_str}" >&2
+
+              # Use jq to construct a compact JSON object for the current package
+              # --arg handles proper escaping for string values (pkg_name, inst_ver, desc)
+              # --argjson handles values that are already valid JSON (avail_ver_jq_val, size_kb_jq_val)
+              jq -c -n \
+                --arg pn "$pkg_name" \
+                --arg iv "$inst_ver" \
+                --argjson av "$avail_ver_jq_val" \
+                --argjson skb "$size_kb_jq_val" \
+                --arg dsc "$desc" \
+                '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
+              echo "Debug: jq command for package '${pkg_name}' completed." >&2
+            done | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
+            # The `jq -s 'if length == 0 then [] else . end'` ensures output is always a valid JSON array,
+            # even if no packages are found (results in "[]").
+
+            echo "Package list generated on remote server." >&2
+
+            # Output the content of the temporary JSON file to stdout
+            cat "$TMP_JSON_FILE"
+
+            # Clean up the temporary file on the remote server
+            rm "$TMP_JSON_FILE"
+
+      - name: Save Package JSON to Runner
+        run: |
+          echo "Saving script stdout to packages.json on the runner..."
+          # Use printf with %s to preserve the exact content without interpretation
+          printf '%s' "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
+          echo "Contents of packages.json (first 500 characters):"
+          head -c 500 packages.json
+          echo
+          echo
+          echo "JSON validation check:"
+          if jq empty packages.json 2>/dev/null; then
+            echo "✓ Valid JSON"
+            echo "Package count: $(jq 'length' packages.json)"
+          else
+            echo "✗ Invalid JSON detected!"
+            exit 1
+          fi
+
+      - name: Upload Package JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-inventory-${{ github.run_number }}
+          path: packages.json
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Simplified Package Inventory generation failed. Check the logs for details."
+          echo "::error::Simplified Package Inventory workflow failed"\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do # Process last line even if no trailing newline
+              if [ -z "$pkg_name" ]; then
+                continue
+              fi
+
+              # Get available version using apt-cache policy
+              avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+
+              avail_ver_jq_val="" # Initialize to prevent issues if not set in conditional
+              if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
+                # If available_version name: Simplified Package Inventory
+
+on:
+  push:
+    branches: [development]
+
+jobs:
+  package-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Package JSON
+        id: scan_packages_step
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            #!/bin/bash
+            set -eo pipefail # Exit on error, treat unset variables as error, propagate pipeline errors
+            
+            # Ensure jq is installed
+            if ! command -v jq &> /dev/null; then
+              echo "jq not found. Installing jq..." >&2
+              sudo apt-get update >/dev/null 2>&1
+              sudo apt-get install -y jq >/dev/null 2>&1
+              echo "jq installed." >&2
+            else
+              echo "jq is already installed." >&2
+            fi
+
+            TMP_JSON_FILE=$(mktemp) # Use a temporary file on the remote server for the JSON output
+
+            # Informational messages go to stderr
+            echo "Updating package cache (apt update)..." >&2 # Clarified apt update
+            sudo apt update >/dev/null 2>&1
+            echo "Package cache updated." >&2
+
+            echo "Generating package list in JSON format..." >&2
+
+            # Main logic to generate a stream of JSON objects, one per package
+            # This stream is then piped to jq -s to collect them into a single JSON array
+            # The final array is written to TMP_JSON_FILE
+            # Use ${Description-First} to get only the first line of the description
+            dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description-First}\n' | \
+            while IFS=
+              echo "--- Debug: Processing package ---" >&2
+              echo "Debug: pkg_name='${pkg_name}'" >&2
+              echo "Debug: inst_ver='${inst_ver}'" >&2
+              echo "Debug: size_kb_str='${size_kb_str}'" >&2
+              # Be careful with desc as it can be multi-line or contain special chars
+              echo "Debug: desc (first 50 chars)='$(echo "$desc" | head -c 50)'" >&2
+
+
+              if [ -z "$pkg_name" ]; then
+                echo "Debug: Skipping empty pkg_name." >&2
+                continue
+              fi
+
+              # Get available version using apt-cache policy
+              echo "Debug: Running apt-cache policy for '${pkg_name}'" >&2
+              avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+              echo "Debug: avail_ver_output='${avail_ver_output}'" >&2
+
+              avail_ver_jq_val="" # Initialize to prevent issues if not set in conditional
+              if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
+                # If available_version exists and is not "(none)", store it as a JSON string
+                avail_ver_jq_val=$(jq -n --arg s "$avail_ver_output" '$s')
+              else
+                # Otherwise, store as JSON null
+                avail_ver_jq_val="null"
+              fi
+              echo "Debug: avail_ver_jq_val='${avail_ver_jq_val}'" >&2
+
+              # Ensure size_kb is a number for jq; default to null if not a valid number
+              size_kb_jq_val="" # Initialize
+              if [[ "$size_kb_str" =~ ^[0-9]+$ ]]; then
+                size_kb_jq_val="$size_kb_str" # Already a number string, jq --argjson will handle
+              else
+                size_kb_jq_val="null" # Store as JSON null if not a plain number
+              fi
+              echo "Debug: size_kb_jq_val='${size_kb_jq_val}'" >&2
+              
+              jq_command_str="jq -c -n --arg pn \"$pkg_name\" --arg iv \"$inst_ver\" --argjson av \"$avail_ver_jq_val\" --argjson skb \"$size_kb_jq_val\" --arg dsc \"$desc\" '{package_name: \$pn, installed_version: \$iv, available_version: \$av, size_kb: \$skb, description: \$dsc}'"
+              echo "Debug: Constructed jq command: ${jq_command_str}" >&2
+
+              # Use jq to construct a compact JSON object for the current package
+              # --arg handles proper escaping for string values (pkg_name, inst_ver, desc)
+              # --argjson handles values that are already valid JSON (avail_ver_jq_val, size_kb_jq_val)
+              jq -c -n \
+                --arg pn "$pkg_name" \
+                --arg iv "$inst_ver" \
+                --argjson av "$avail_ver_jq_val" \
+                --argjson skb "$size_kb_jq_val" \
+                --arg dsc "$desc" \
+                '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
+              echo "Debug: jq command for package '${pkg_name}' completed." >&2
+            done | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
+            # The `jq -s 'if length == 0 then [] else . end'` ensures output is always a valid JSON array,
+            # even if no packages are found (results in "[]").
+
+            echo "Package list generated on remote server." >&2
+
+            # Output the content of the temporary JSON file to stdout
+            cat "$TMP_JSON_FILE"
+
+            # Clean up the temporary file on the remote server
+            rm "$TMP_JSON_FILE"
+
+      - name: Save Package JSON to Runner
+        run: |
+          echo "Saving script stdout to packages.json on the runner..."
+          # Use printf with %s to preserve the exact content without interpretation
+          printf '%s' "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
+          echo "Contents of packages.json (first 500 characters):"
+          head -c 500 packages.json
+          echo
+          echo
+          echo "JSON validation check:"
+          if jq empty packages.json 2>/dev/null; then
+            echo "✓ Valid JSON"
+            echo "Package count: $(jq 'length' packages.json)"
+          else
+            echo "✗ Invalid JSON detected!"
+            exit 1
+          fi
+
+      - name: Upload Package JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-inventory-${{ github.run_number }}
+          path: packages.json
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Simplified Package Inventory generation failed. Check the logs for details."
+          echo "::error::Simplified Package Inventory workflow failed"\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do # Process last line even if no trailing newline
               echo "--- Debug: Processing package ---" >&2
               echo "Debug: pkg_name='${pkg_name}'" >&2
               echo "Debug: inst_ver='${inst_ver}'" >&2
