@@ -22,7 +22,8 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           script: |
             #!/bin/bash
-            set -eo pipefail
+            # Note: Removed 'set -e' to prevent premature exits from arithmetic operations
+            set -o pipefail
             
             # Ensure jq is installed
             if ! command -v jq &> /dev/null; then
@@ -46,26 +47,30 @@ jobs:
             # Count total packages for progress reporting
             TOTAL_PACKAGES=$(dpkg-query -W -f='${Package}\n' | wc -l)
             echo "Total packages to process: $TOTAL_PACKAGES" >&2
-            COUNTER=0
-
+            
             # Generate JSON objects for each package
-            # Using a subshell to ensure proper pipe handling
-            (
-              dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description}\n' | \
-              awk -F'\t' 'BEGIN{OFS="\t"} {gsub(/\r?\n/, " ", $4); print $1, $2, $3, $4}' | \
+            dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Description}\n' | \
+            awk -F'\t' 'BEGIN{OFS="\t"} {gsub(/\r?\n/, " ", $4); print $1, $2, $3, $4}' | \
+            {
+              COUNTER=0
               while IFS=$'\t' read -r pkg_name inst_ver size_kb_str desc || [[ -n "$pkg_name" ]]; do
                 if [ -z "$pkg_name" ]; then
                   continue
                 fi
 
-                ((COUNTER++))
+                COUNTER=$((COUNTER + 1))
+                
                 # Show progress every 100 packages
-                if ((COUNTER % 100 == 0)); then
+                if [ $((COUNTER % 100)) -eq 0 ]; then
                   echo "Progress: $COUNTER/$TOTAL_PACKAGES packages processed..." >&2
                 fi
 
-                # Get available version
-                avail_ver_output=$(apt-cache policy "$pkg_name" 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+                # Get available version with error handling
+                avail_ver_output=""
+                apt_cache_output=$(apt-cache policy "$pkg_name" 2>/dev/null || true)
+                if [ -n "$apt_cache_output" ]; then
+                  avail_ver_output=$(echo "$apt_cache_output" | grep "Candidate:" | awk '{print $2}' || true)
+                fi
 
                 # Prepare available version for JSON
                 if [ -n "$avail_ver_output" ] && [ "$avail_ver_output" != "(none)" ]; then
@@ -90,32 +95,38 @@ jobs:
                   --arg dsc "$desc" \
                   '{package_name: $pn, installed_version: $iv, available_version: $av, size_kb: $skb, description: $dsc}'
               done
-            ) | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
+              echo "All packages processed successfully." >&2
+            } | jq -s 'if length == 0 then [] else . end' > "$TMP_JSON_FILE"
 
-            echo "All packages processed successfully." >&2
             echo "Package list generated on remote server." >&2
 
             # Output the JSON content
             cat "$TMP_JSON_FILE"
 
             # Clean up
-            rm "$TMP_JSON_FILE"
+            rm -f "$TMP_JSON_FILE"
 
       - name: Save Package JSON to Runner
         run: |
           echo "Saving script stdout to packages.json on the runner..."
           # Use printf with %s to preserve exact content
           printf '%s' "${{ steps.scan_packages_step.outputs.stdout }}" > packages.json
-          echo "Contents of packages.json (first 500 characters):"
-          head -c 500 packages.json
-          echo
-          echo
+          
+          echo "File size: $(wc -c < packages.json) bytes"
+          
           echo "JSON validation check:"
           if jq empty packages.json 2>/dev/null; then
             echo "✓ Valid JSON"
             echo "Package count: $(jq 'length' packages.json)"
+            echo "Sample package:"
+            jq '.[0]' packages.json 2>/dev/null || echo "No packages found"
           else
             echo "✗ Invalid JSON detected!"
+            echo "First 1000 characters:"
+            head -c 1000 packages.json
+            echo
+            echo "Last 1000 characters:"
+            tail -c 1000 packages.json
             exit 1
           fi
 
