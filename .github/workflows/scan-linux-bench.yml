@@ -1,0 +1,86 @@
+name: Linux CIS Benchmark Scan
+
+on:
+  push:
+    branches: [development]
+
+jobs:
+  linux-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run linux-bench CIS scan on remote server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            #!/bin/bash
+            set -e # Exit immediately if a command exits with a non-zero status.
+            set -o pipefail # Ensure pipeline errors are caught.
+
+            echo ">>> Updating package lists on remote server..."
+            sudo apt-get update -y >/dev/null 2>&1
+            echo "Package lists updated."
+
+            echo ">>> Ensuring Go is installed on remote server..."
+            if ! command -v go &> /dev/null; then
+              echo "Go not found. Installing Go using apt-get..."
+              sudo apt-get install -y golang-go >/dev/null 2>&1
+              echo "Go installed."
+            else
+              echo "Go is already installed: $(go version)"
+            fi
+
+            # Configure Go environment variables if not already set by system/user profile
+            export GOPATH=${GOPATH:-$HOME/go}
+            export PATH=$PATH:$GOPATH/bin:/usr/local/go/bin # Add Go binary paths
+            # Ensure GOPATH directories exist
+            mkdir -p "$GOPATH/src" "$GOPATH/bin"
+            echo "GOPATH configured: $GOPATH"
+            echo "PATH updated: $PATH"
+
+            echo ">>> Fetching aquasecurity/linux-bench..."
+            BENCH_SRC_DIR="$GOPATH/src/github.com/aquasecurity/linux-bench"
+            # Clean up previous build if it exists
+            if [ -d "$BENCH_SRC_DIR" ]; then
+              echo "Removing existing linux-bench source directory: $BENCH_SRC_DIR"
+              rm -rf "$BENCH_SRC_DIR"
+            fi
+            # Fetch the package
+            # The 'go get' command for binaries is changing. For modern Go, 'go install' is preferred for binaries.
+            # However, to stick to the original commands: go get, then build from source.
+            if go get github.com/aquasecurity/linux-bench; then
+              echo "linux-bench fetched successfully."
+            else
+              echo "ERROR: Failed to fetch linux-bench. Exiting."
+              exit 1
+            fi
+
+            echo ">>> Building linux-bench..."
+            cd "$BENCH_SRC_DIR"
+            # Remove old binary if it exists to ensure a fresh build
+            if [ -f "linux-bench" ]; then rm linux-bench; fi
+            if go build -o linux-bench .; then
+              echo "linux-bench built successfully at $BENCH_SRC_DIR/linux-bench"
+            else
+              echo "ERROR: Failed to build linux-bench. Exiting."
+              exit 1
+            fi
+
+            echo ">>> Running linux-bench scan (default CIS version)..."
+            # The benchmark likely requires sudo privileges for a comprehensive scan.
+            # Output will stream to GitHub Actions logs. Job will not fail based on scan results.
+            if sudo ./linux-bench; then
+              echo "linux-bench scan completed."
+            else
+              echo "WARNING: linux-bench scan reported issues or encountered an error during its execution."
+              # This will not fail the GitHub Action step as per user preference.
+            fi
+
+            echo ">>> Linux Bench script finished."
