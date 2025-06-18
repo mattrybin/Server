@@ -24,8 +24,40 @@ jobs:
             set -e # Exit immediately if a command exits with a non-zero status.
             set -o pipefail # Ensure pipeline errors are caught.
 
-            echo ">>> Updating package lists on remote server..."
-            sudo apt-get update -y >/dev/null 2>&1
+            echo ">>> Checking disk space on remote server..."
+            df -h
+            echo ">>> Attempting to remove apt lock files..."
+            sudo rm -f /var/lib/dpkg/lock
+            sudo rm -f /var/lib/dpkg/lock-frontend
+            sudo rm -f /var/lib/apt/lists/lock
+            sudo rm -f /var/cache/apt/archives/lock
+            echo "Lock file removal attempted."
+
+            echo ">>> Cleaning apt cache..."
+            sudo apt-get clean
+            echo "Apt cache cleaned."
+
+            echo ">>> Updating package lists on remote server (with retries)..."
+            APT_UPDATE_SUCCESS=false
+            set +e # Temporarily disable exit on error
+            for i in 1 2 3; do
+              echo "Attempting apt-get update (Attempt $i/3)..."
+              sudo apt-get update -y
+              APT_EXIT_CODE=$?
+              if [ $APT_EXIT_CODE -eq 0 ]; then
+                APT_UPDATE_SUCCESS=true
+                echo "apt-get update successful."
+                break
+              fi
+              echo "apt-get update failed on attempt $i with exit code $APT_EXIT_CODE. Retrying in 15 seconds..."
+              sleep 15
+            done
+            set -e # Re-enable exit on error
+
+            if [ "$APT_UPDATE_SUCCESS" = false ]; then
+              echo "ERROR: apt-get update failed after 3 attempts. Final exit code $APT_EXIT_CODE."
+              exit 1 # Exit the script, which will fail the GitHub Action step
+            fi
             echo "Package lists updated."
 
             echo ">>> Ensuring Go is installed on remote server..."
