@@ -7,112 +7,109 @@ on:
 jobs:
   linux-benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [ubuntu, debian, centos]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run linux-bench CIS scan on remote server
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          script: |
-            #!/bin/bash
-            set -e # Exit immediately if a command exits with a non-zero status.
-            set -o pipefail # Ensure pipeline errors are caught.
+      - name: Run linux-bench CIS scan in ${{ matrix.distro }} container
+        run: |
+          set -e 
+          set -o pipefail
 
-            echo ">>> Checking disk space on remote server..."
-            df -h
-            echo ">>> Attempting to remove apt lock files..."
-            sudo rm -f /var/lib/dpkg/lock
-            sudo rm -f /var/lib/dpkg/lock-frontend
-            sudo rm -f /var/lib/apt/lists/lock
-            sudo rm -f /var/cache/apt/archives/lock
-            echo "Lock file removal attempted."
+          DOCKER_IMAGE=""
+          PRE_INSTALL_CMDS=""
+          INSTALL_PACKAGES_CMD=""
+          OS_VERSION_CMD=""
 
-            echo ">>> Cleaning apt cache..."
-            sudo apt-get clean
-            echo "Apt cache cleaned."
+          if [ "${{ matrix.distro }}" == "ubuntu" ]; then
+            DOCKER_IMAGE="ubuntu:latest"
+            PRE_INSTALL_CMDS="echo '>>> Attempting to remove apt lock files...'; \
+                              rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock; \
+                              echo 'Lock file removal attempted.'; \
+                              echo '>>> Cleaning apt cache...'; \
+                              apt-get clean; \
+                              echo 'Apt cache cleaned.';"
+            INSTALL_PACKAGES_CMD="apt-get update -y && apt-get install -y sudo curl git golang-go"
+            OS_VERSION_CMD="cat /etc/os-release"
+          elif [ "${{ matrix.distro }}" == "debian" ]; then
+            DOCKER_IMAGE="debian:latest"
+            PRE_INSTALL_CMDS="echo '>>> Attempting to remove apt lock files...'; \
+                              rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock; \
+                              echo 'Lock file removal attempted.'; \
+                              echo '>>> Cleaning apt cache...'; \
+                              apt-get clean; \
+                              echo 'Apt cache cleaned.';"
+            INSTALL_PACKAGES_CMD="apt-get update -y && apt-get install -y sudo curl git golang-go"
+            OS_VERSION_CMD="cat /etc/os-release"
+          elif [ "${{ matrix.distro }}" == "centos" ]; then
+            DOCKER_IMAGE="centos:latest"
+            INSTALL_PACKAGES_CMD="dnf update -y && dnf install -y sudo curl git golang findutils" # findutils for xargs in some go tools
+            OS_VERSION_CMD="cat /etc/centos-release || cat /etc/redhat-release"
+          else
+            echo "Unsupported distribution: ${{ matrix.distro }}"
+            exit 1
+          fi
 
-            echo ">>> Updating package lists on remote server (with retries)..."
-            APT_UPDATE_SUCCESS=false
-            set +e # Temporarily disable exit on error
-            for i in 1 2 3; do
-              echo "Attempting apt-get update (Attempt $i/3)..."
-              sudo apt-get update -y
-              APT_EXIT_CODE=$?
-              if [ $APT_EXIT_CODE -eq 0 ]; then
-                APT_UPDATE_SUCCESS=true
-                echo "apt-get update successful."
-                break
-              fi
-              echo "apt-get update failed on attempt $i with exit code $APT_EXIT_CODE. Retrying in 15 seconds..."
-              sleep 15
-            done
-            set -e # Re-enable exit on error
+          echo ">>> Starting scan for ${{ matrix.distro }} using ${DOCKER_IMAGE}"
 
-            if [ "$APT_UPDATE_SUCCESS" = false ]; then
-              echo "ERROR: apt-get update failed after 3 attempts. Final exit code $APT_EXIT_CODE."
-              exit 1 # Exit the script, which will fail the GitHub Action step
+          docker run --rm -v "$PWD:/scan_ws" -w /scan_ws "$DOCKER_IMAGE" /bin/bash -c "
+            set -e
+            set -o pipefail
+
+            echo '>>> Running inside Docker container for ${{ matrix.distro }}'
+            echo '>>> OS Version:'
+            ${OS_VERSION_CMD}
+            
+            if [ -n \"${PRE_INSTALL_CMDS}\" ]; then
+              eval \"${PRE_INSTALL_CMDS}\"
             fi
-            echo "Package lists updated."
 
-            echo ">>> Ensuring Go is installed on remote server..."
+            echo '>>> Installing dependencies...'
+            ${INSTALL_PACKAGES_CMD}
+            echo 'Dependencies installed.'
+
+            echo '>>> Ensuring Go is installed...'
             if ! command -v go &> /dev/null; then
-              echo "Go not found. Installing Go using apt-get..."
-              sudo apt-get install -y golang-go >/dev/null 2>&1
-              echo "Go installed."
+              echo 'Go not found after package installation. This should not happen.'
+              exit 1
             else
-              echo "Go is already installed: $(go version)"
+              echo \"Go is installed: \$(go version)\"
             fi
 
-            # Configure Go environment variables if not already set by system/user profile
-            export GOPATH=${GOPATH:-$HOME/go}
-            export PATH=$PATH:$GOPATH/bin:/usr/local/go/bin # Add Go binary paths
-            # Ensure GOPATH directories exist
-            mkdir -p "$GOPATH/src" "$GOPATH/bin"
-            echo "GOPATH configured: $GOPATH"
-            echo "PATH updated: $PATH"
+            export GOPATH=\${GOPATH:-\$HOME/go}
+            export PATH=\$PATH:\$GOPATH/bin:/usr/local/go/bin
+            mkdir -p \"\$GOPATH/src\" \"\$GOPATH/bin\"
+            echo \"GOPATH configured: \$GOPATH\"
+            echo \"PATH updated: \$PATH\"
 
-            echo ">>> Fetching aquasecurity/linux-bench..."
-            BENCH_SRC_DIR="$GOPATH/src/github.com/aquasecurity/linux-bench"
-            # Clean up previous build if it exists
-            if [ -d "$BENCH_SRC_DIR" ]; then
-              echo "Removing existing linux-bench source directory: $BENCH_SRC_DIR"
-              rm -rf "$BENCH_SRC_DIR"
-            fi
-            # Fetch the package
-            # The 'go get' command for binaries is changing. For modern Go, 'go install' is preferred for binaries.
-            # However, to stick to the original commands: go get, then build from source.
-            if go get github.com/aquasecurity/linux-bench; then
-              echo "linux-bench fetched successfully."
+            echo '>>> Fetching aquasecurity/linux-bench...'
+            if go install github.com/aquasecurity/linux-bench@latest; then
+              echo 'linux-bench installed successfully.'
             else
-              echo "ERROR: Failed to fetch linux-bench. Exiting."
+              echo 'ERROR: Failed to install linux-bench. Exiting.'
               exit 1
             fi
-
-            echo ">>> Building linux-bench..."
-            cd "$BENCH_SRC_DIR"
-            # Remove old binary if it exists to ensure a fresh build
-            if [ -f "linux-bench" ]; then rm linux-bench; fi
-            if go build -o linux-bench .; then
-              echo "linux-bench built successfully at $BENCH_SRC_DIR/linux-bench"
-            else
-              echo "ERROR: Failed to build linux-bench. Exiting."
-              exit 1
+            
+            # Verify linux-bench is in GOPATH/bin
+            if [ ! -f \"\$GOPATH/bin/linux-bench\" ]; then
+                echo \"ERROR: linux-bench not found in \$GOPATH/bin after installation.\"
+                ls -la \$GOPATH/bin
+                exit 1
             fi
 
-            echo ">>> Running linux-bench scan (default CIS version)..."
-            # The benchmark likely requires sudo privileges for a comprehensive scan.
-            # Output will stream to GitHub Actions logs. Job will not fail based on scan results.
-            if sudo ./linux-bench; then
-              echo "linux-bench scan completed."
+            echo '>>> Running linux-bench scan (default CIS version)...'
+            if sudo \$GOPATH/bin/linux-bench; then
+              echo 'linux-bench scan completed.'
             else
-              echo "WARNING: linux-bench scan reported issues or encountered an error during its execution."
-              # This will not fail the GitHub Action step as per user preference.
+              echo 'WARNING: linux-bench scan reported issues or encountered an error during its execution.'
             fi
 
-            echo ">>> Linux Bench script finished."
+            echo '>>> Linux Bench script finished for ${{ matrix.distro }}.'
+          "
+          echo ">>> Scan finished for ${{ matrix.distro }}"
